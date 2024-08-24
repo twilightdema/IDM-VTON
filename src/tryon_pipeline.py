@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -458,6 +459,10 @@ class StableDiffusionXLInpaintPipeline(
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
     def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
+        self.push_module_to_gpu(self.image_encoder, device)
+        # self.push_module_to_gpu(self.feature_extractor, device)
+        self.print_gpu_mem('encode_image => started.')
+
         dtype = next(self.image_encoder.parameters()).dtype
         # print(image.shape)
         if not isinstance(image, torch.Tensor):
@@ -473,11 +478,20 @@ class StableDiffusionXLInpaintPipeline(
             uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
                 num_images_per_prompt, dim=0
             )
+            self.pull_module_from_gpu(self.image_encoder)
+            # self.pull_module_from_gpu(self.feature_extractor)
+            self.cleanup_gpu()
+            self.print_gpu_mem('encode_image => finished.')
+
             return image_enc_hidden_states, uncond_image_enc_hidden_states
         else:
             image_embeds = self.image_encoder(image).image_embeds
             image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
             uncond_image_embeds = torch.zeros_like(image_embeds)
+            self.pull_module_from_gpu(self.image_encoder)
+            # self.pull_module_from_gpu(self.feature_extractor)
+            self.cleanup_gpu()
+            self.print_gpu_mem('encode_image => finished.')
 
             return image_embeds, uncond_image_embeds
 
@@ -506,6 +520,20 @@ class StableDiffusionXLInpaintPipeline(
 
         return image_embeds
 
+    def print_gpu_mem(self, text: str):
+        print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
+
+    def cleanup_gpu(self):
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    def push_module_to_gpu(self, mod, device):
+        mod.to(device)
+        return mod
+    
+    def pull_module_from_gpu(self, mod):
+        mod.to('cpu')
+        return mod
 
     # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl.StableDiffusionXLPipeline.encode_prompt
     def encode_prompt(
@@ -598,6 +626,11 @@ class StableDiffusionXLInpaintPipeline(
         text_encoders = (
             [self.text_encoder, self.text_encoder_2] if self.text_encoder is not None else [self.text_encoder_2]
         )
+
+        for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+            # self.push_module_to_gpu(tokenizer, device)
+            self.push_module_to_gpu(text_encoder, device)
+        self.print_gpu_mem('tokenizer.to(device)')
 
         if prompt_embeds is None:
             prompt_2 = prompt_2 or prompt
@@ -739,6 +772,12 @@ class StableDiffusionXLInpaintPipeline(
             if isinstance(self, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
                 # Retrieve the original scale by scaling back the LoRA layers
                 unscale_lora_layers(self.text_encoder_2, lora_scale)
+
+        for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+            # self.pull_module_from_gpu(tokenizer)
+            self.pull_module_from_gpu(text_encoder)
+        self.cleanup_gpu()
+        self.print_gpu_mem('tokenizer.to("cpu")')
 
         return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
 
@@ -1297,6 +1336,7 @@ class StableDiffusionXLInpaintPipeline(
         pooled_prompt_embeds_c=None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        device: Optional[torch.device] = None,
         **kwargs,
     ):
         r"""
@@ -1526,8 +1566,6 @@ class StableDiffusionXLInpaintPipeline(
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self._execution_device
-
         # 3. Encode input prompt
         text_encoder_lora_scale = (
             self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
@@ -1553,6 +1591,10 @@ class StableDiffusionXLInpaintPipeline(
             lora_scale=text_encoder_lora_scale,
             clip_skip=self.clip_skip,
         )
+
+        self.push_module_to_gpu(self.vae, device)
+        # self.push_module_to_gpu(self.scheduler, device)
+        self.print_gpu_mem('After pushing VAE / Scheduler to GPU')
 
         # 4. set timesteps
         def denoising_value_valid(dnv):
@@ -1717,10 +1759,16 @@ class StableDiffusionXLInpaintPipeline(
         add_text_embeds = add_text_embeds.to(device)
         add_time_ids = add_time_ids.to(device)
 
+        self.push_module_to_gpu(self.unet, device)
+        self.print_gpu_mem('After pushing unet')
+
         if ip_adapter_image is not None:
             image_embeds = self.prepare_ip_adapter_image_embeds(
                 ip_adapter_image, device, batch_size * num_images_per_prompt
             )
+
+            image_embeds = image_embeds.to(device)
+            prompt_embeds = prompt_embeds.to(device)
 
             #project outside for loop
             image_embeds = self.unet.encoder_hid_proj(image_embeds).to(prompt_embeds.dtype)
@@ -1762,6 +1810,10 @@ class StableDiffusionXLInpaintPipeline(
 
         self._num_timesteps = len(timesteps)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            
+            self.push_module_to_gpu(self.unet_encoder, device)
+            self.print_gpu_mem('begin denoising')
+
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -1865,6 +1917,14 @@ class StableDiffusionXLInpaintPipeline(
                 if XLA_AVAILABLE:
                     xm.mark_step()
 
+            self.pull_module_from_gpu(self.unet_encoder)
+            self.cleanup_gpu()
+            self.print_gpu_mem('end denoising')
+
+        self.pull_module_from_gpu(self.unet)
+        self.cleanup_gpu()
+        self.print_gpu_mem('After pulling unet')
+
         if not output_type == "latent":
             # make sure the VAE is in float32 mode, as it overflows in float16
             needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
@@ -1880,6 +1940,11 @@ class StableDiffusionXLInpaintPipeline(
                 self.vae.to(dtype=torch.float16)
         # else:
         #     return StableDiffusionXLPipelineOutput(images=latents)
+
+        self.pull_module_from_gpu(self.vae)
+        # self.pull_module_from_gpu(self.scheduler)
+        self.cleanup_gpu()
+        self.print_gpu_mem('After pulling VAE / Scheduler from GPU')
 
 
         image = self.image_processor.postprocess(image, output_type=output_type)

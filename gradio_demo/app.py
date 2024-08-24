@@ -26,7 +26,10 @@ from preprocess.openpose.run_openpose import OpenPose
 from detectron2.data.detection_utils import convert_PIL_to_numpy,_apply_exif_orientation
 from torchvision.transforms.functional import to_pil_image
 
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+import gc
+
+device = torch.device('cuda:0') if torch.cuda.is_available() else 'cpu'
+# device = 'cpu'
 
 def pil_to_binary_mask(pil_image, threshold=0):
     np_image = np.array(pil_image)
@@ -92,9 +95,6 @@ UNet_Encoder = UNet2DConditionModel_ref.from_pretrained(
     torch_dtype=torch.float16,
 )
 
-parsing_model = Parsing(0)
-openpose_model = OpenPose(0)
-
 UNet_Encoder.requires_grad_(False)
 image_encoder.requires_grad_(False)
 vae.requires_grad_(False)
@@ -123,12 +123,11 @@ pipe = TryonPipeline.from_pretrained(
 )
 pipe.unet_encoder = UNet_Encoder
 
+def print_gpu_mem(text: str):
+    print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
+
 def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_steps,seed):
     
-    openpose_model.preprocessor.body_estimation.model.to(device)
-    pipe.to(device)
-    pipe.unet_encoder.to(device)
-
     garm_img= garm_img.convert("RGB").resize((768,1024))
     human_img_orig = dict["background"].convert("RGB")    
     
@@ -146,10 +145,20 @@ def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_ste
     else:
         human_img = human_img_orig.resize((768,1024))
 
-
     if is_checked:
-        keypoints = openpose_model(human_img.resize((384,512)))
+        print_gpu_mem('Step 0')
+        parsing_model = Parsing(0)
+        openpose_model = OpenPose(0)
+        openpose_model.preprocessor.body_estimation.model.to(device)
+        keypoints = openpose_model(human_img.resize((384,512)))        
         model_parse, _ = parsing_model(human_img.resize((384,512)))
+        openpose_model.preprocessor.body_estimation.model.to("cpu")
+        del openpose_model
+        del parsing_model
+        gc.collect()
+        torch.cuda.empty_cache()
+        print_gpu_mem('Step 1')
+
         mask, mask_gray = get_mask_location('hd', "upper_body", model_parse, keypoints)
         mask = mask.resize((768,1024))
     else:
@@ -170,68 +179,91 @@ def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_ste
     pose_img = args.func(args,human_img_arg)    
     pose_img = pose_img[:,:,::-1]    
     pose_img = Image.fromarray(pose_img).resize((768,1024))
-    
+
+    print_gpu_mem('Step 2')
+    del args
+    gc.collect()
+    torch.cuda.empty_cache()
+    print_gpu_mem('Step 3')
+
+    print_gpu_mem('Step 4,5')
+
     with torch.no_grad():
-        # Extract the images
-        with torch.cuda.amp.autocast():
-            with torch.no_grad():
-                prompt = "model is wearing " + garment_des
-                negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
-                with torch.inference_mode():
-                    (
-                        prompt_embeds,
-                        negative_prompt_embeds,
-                        pooled_prompt_embeds,
-                        negative_pooled_prompt_embeds,
-                    ) = pipe.encode_prompt(
-                        prompt,
-                        num_images_per_prompt=1,
-                        do_classifier_free_guidance=True,
-                        negative_prompt=negative_prompt,
-                    )
-                                    
-                    prompt = "a photo of " + garment_des
+        with torch.autograd.graph.save_on_cpu():
+            # Extract the images
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    prompt = "model is wearing " + garment_des
                     negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
-                    if not isinstance(prompt, List):
-                        prompt = [prompt] * 1
-                    if not isinstance(negative_prompt, List):
-                        negative_prompt = [negative_prompt] * 1
                     with torch.inference_mode():
+                        print_gpu_mem('Step 6')
                         (
-                            prompt_embeds_c,
-                            _,
-                            _,
-                            _,
+                            prompt_embeds,
+                            negative_prompt_embeds,
+                            pooled_prompt_embeds,
+                            negative_pooled_prompt_embeds,
                         ) = pipe.encode_prompt(
                             prompt,
                             num_images_per_prompt=1,
-                            do_classifier_free_guidance=False,
+                            do_classifier_free_guidance=True,
                             negative_prompt=negative_prompt,
+                            device=device,
                         )
+                        print_gpu_mem('Step 7')
+                                        
+                        prompt = "a photo of " + garment_des
+                        negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+                        if not isinstance(prompt, List):
+                            prompt = [prompt] * 1
+                        if not isinstance(negative_prompt, List):
+                            negative_prompt = [negative_prompt] * 1
+                        with torch.inference_mode():
+                            print_gpu_mem('Step 8')
+                            (
+                                prompt_embeds_c,
+                                _,
+                                _,
+                                _,
+                            ) = pipe.encode_prompt(
+                                prompt,
+                                num_images_per_prompt=1,
+                                do_classifier_free_guidance=False,
+                                negative_prompt=negative_prompt,
+                                device=device,
+                            )
+                            print_gpu_mem('Step 9')
 
+                        pose_img =  tensor_transfrom(pose_img).unsqueeze(0).to(device,torch.float16)
+                        garm_tensor =  tensor_transfrom(garm_img).unsqueeze(0).to(device,torch.float16)
+                        generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
+                        print_gpu_mem('Step 10')
+                        images = pipe(
+                            prompt_embeds=prompt_embeds.to(device,torch.float16),
+                            negative_prompt_embeds=negative_prompt_embeds.to(device,torch.float16),
+                            pooled_prompt_embeds=pooled_prompt_embeds.to(device,torch.float16),
+                            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device,torch.float16),
+                            num_inference_steps=denoise_steps,
+                            generator=generator,
+                            strength = 1.0,
+                            pose_img = pose_img.to(device,torch.float16),
+                            text_embeds_cloth=prompt_embeds_c.to(device,torch.float16),
+                            cloth = garm_tensor.to(device,torch.float16),
+                            mask_image=mask,
+                            image=human_img, 
+                            height=1024,
+                            width=768,
+                            ip_adapter_image = garm_img.resize((768,1024)),
+                            guidance_scale=2.0,
+                            device=device,
+                        )[0]
+                        print_gpu_mem('Step 11')
 
-
-                    pose_img =  tensor_transfrom(pose_img).unsqueeze(0).to(device,torch.float16)
-                    garm_tensor =  tensor_transfrom(garm_img).unsqueeze(0).to(device,torch.float16)
-                    generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
-                    images = pipe(
-                        prompt_embeds=prompt_embeds.to(device,torch.float16),
-                        negative_prompt_embeds=negative_prompt_embeds.to(device,torch.float16),
-                        pooled_prompt_embeds=pooled_prompt_embeds.to(device,torch.float16),
-                        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device,torch.float16),
-                        num_inference_steps=denoise_steps,
-                        generator=generator,
-                        strength = 1.0,
-                        pose_img = pose_img.to(device,torch.float16),
-                        text_embeds_cloth=prompt_embeds_c.to(device,torch.float16),
-                        cloth = garm_tensor.to(device,torch.float16),
-                        mask_image=mask,
-                        image=human_img, 
-                        height=1024,
-                        width=768,
-                        ip_adapter_image = garm_img.resize((768,1024)),
-                        guidance_scale=2.0,
-                    )[0]
+    print_gpu_mem('Step 12')
+    pipe.to("cpu")
+    pipe.unet_encoder.to("cpu")
+    gc.collect()
+    torch.cuda.empty_cache()
+    print_gpu_mem('Step 13')
 
     if is_checked_crop:
         out_img = images[0].resize(crop_size)        
