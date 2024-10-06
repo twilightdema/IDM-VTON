@@ -27,13 +27,15 @@ import pdb
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 class OpenPose:
-    def __init__(self, gpu_id: int):
-        self.gpu_id = gpu_id
-        torch.cuda.set_device(gpu_id)
+    def __init__(self, device: torch.device):
+        self.device = device
+        if device.type == 'cuda':
+            torch.cuda.set_device(device)
         self.preprocessor = OpenposeDetector()
 
     def __call__(self, input_image, resolution=384):
-        torch.cuda.set_device(self.gpu_id)
+        if self.device.type == 'cuda':
+            torch.cuda.set_device(self.device)
         if isinstance(input_image, Image.Image):
             input_image = np.asarray(input_image)
         elif type(input_image) == str:
@@ -45,6 +47,7 @@ class OpenPose:
             input_image = resize_image(input_image, resolution)
             H, W, C = input_image.shape
             assert (H == 512 and W == 384), 'Incorrect input image shape'
+            
             pose, detected_map = self.preprocessor(input_image, hand_and_face=False)
 
             candidate = pose['bodies']['candidate']

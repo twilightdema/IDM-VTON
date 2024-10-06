@@ -49,6 +49,9 @@ class Hand(object):
             data = torch.from_numpy(im).float()
             if torch.cuda.is_available():
                 data = data.cuda()
+            elif torch.backends.mps.is_available():  
+                mps_device = torch.device("mps:0")  
+                data = data.to(mps_device)  
 
             with torch.no_grad():
                 output = self.model(data).cpu().numpy()

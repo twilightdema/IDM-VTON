@@ -28,8 +28,8 @@ from torchvision.transforms.functional import to_pil_image
 
 import gc
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# device = 'cpu'
+device_name = 'mps'
+device = torch.device(device_name)
 
 def pil_to_binary_mask(pil_image, threshold=0):
     np_image = np.array(pil_image)
@@ -51,7 +51,8 @@ example_path = os.path.join(os.path.dirname(__file__), 'example')
 unet = UNet2DConditionModel.from_pretrained(
     base_path,
     subfolder="unet",
-    torch_dtype=torch.float16,
+    # torch_dtype=torch.float16,
+    torch_dtype=torch.float32,
 )
 unet.requires_grad_(False)
 tokenizer_one = AutoTokenizer.from_pretrained(
@@ -71,28 +72,33 @@ noise_scheduler = DDPMScheduler.from_pretrained(base_path, subfolder="scheduler"
 text_encoder_one = CLIPTextModel.from_pretrained(
     base_path,
     subfolder="text_encoder",
-    torch_dtype=torch.float16,
+    # torch_dtype=torch.float16,
+    torch_dtype=torch.float32,
 )
 text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
     base_path,
     subfolder="text_encoder_2",
-    torch_dtype=torch.float16,
+    # torch_dtype=torch.float16,
+    torch_dtype=torch.float32,
 )
 image_encoder = CLIPVisionModelWithProjection.from_pretrained(
     base_path,
     subfolder="image_encoder",
-    torch_dtype=torch.float16,
-    )
+    # torch_dtype=torch.float16,
+    torch_dtype=torch.float32,
+)
 vae = AutoencoderKL.from_pretrained(base_path,
                                     subfolder="vae",
-                                    torch_dtype=torch.float16,
+                                    # torch_dtype=torch.float16,
+                                    torch_dtype=torch.float32,
 )
 
 # "stabilityai/stable-diffusion-xl-base-1.0",
 UNet_Encoder = UNet2DConditionModel_ref.from_pretrained(
     base_path,
     subfolder="unet_encoder",
-    torch_dtype=torch.float16,
+    # torch_dtype=torch.float16,
+    torch_dtype=torch.float32,
 )
 
 UNet_Encoder.requires_grad_(False)
@@ -119,7 +125,9 @@ pipe = TryonPipeline.from_pretrained(
         tokenizer_2 = tokenizer_two,
         scheduler = noise_scheduler,
         image_encoder=image_encoder,
-        torch_dtype=torch.float16,
+        # torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
+        # variant='fp32',
 )
 pipe.unet_encoder = UNet_Encoder
 
@@ -174,7 +182,8 @@ def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_ste
      
     
 
-    args = apply_net.create_argument_parser().parse_args(('show', './configs/densepose_rcnn_R_50_FPN_s1x.yaml', './ckpt/densepose/model_final_162be9.pkl', 'dp_segm', '-v', '--opts', 'MODEL.DEVICE', 'cuda'))
+    # args = apply_net.create_argument_parser().parse_args(('show', './configs/densepose_rcnn_R_50_FPN_s1x.yaml', './ckpt/densepose/model_final_162be9.pkl', 'dp_segm', '-v', '--opts', 'MODEL.DEVICE', 'cuda'))
+    args = apply_net.create_argument_parser().parse_args(('show', './configs/densepose_rcnn_R_50_FPN_s1x.yaml', './ckpt/densepose/model_final_162be9.pkl', 'dp_segm', '-v', '--opts', 'MODEL.DEVICE', 'cpu'))
     # verbosity = getattr(args, "verbosity", None)
     pose_img = args.func(args,human_img_arg)    
     pose_img = pose_img[:,:,::-1]    
@@ -233,21 +242,24 @@ def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_ste
                             )
                             print_gpu_mem('Step 9')
 
-                        pose_img =  tensor_transfrom(pose_img).unsqueeze(0).to(device,torch.float16)
-                        garm_tensor =  tensor_transfrom(garm_img).unsqueeze(0).to(device,torch.float16)
+                        # precision = torch.float16
+                        precision = torch.float32
+
+                        pose_img =  tensor_transfrom(pose_img).unsqueeze(0).to(device, precision)
+                        garm_tensor =  tensor_transfrom(garm_img).unsqueeze(0).to(device, precision)
                         generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
                         print_gpu_mem('Step 10')
                         images = pipe(
-                            prompt_embeds=prompt_embeds.to(device,torch.float16),
-                            negative_prompt_embeds=negative_prompt_embeds.to(device,torch.float16),
-                            pooled_prompt_embeds=pooled_prompt_embeds.to(device,torch.float16),
-                            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device,torch.float16),
+                            prompt_embeds=prompt_embeds.to(device, precision),
+                            negative_prompt_embeds=negative_prompt_embeds.to(device, precision),
+                            pooled_prompt_embeds=pooled_prompt_embeds.to(device, precision),
+                            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device, precision),
                             num_inference_steps=denoise_steps,
                             generator=generator,
                             strength = 1.0,
-                            pose_img = pose_img.to(device,torch.float16),
-                            text_embeds_cloth=prompt_embeds_c.to(device,torch.float16),
-                            cloth = garm_tensor.to(device,torch.float16),
+                            pose_img = pose_img.to(device, precision),
+                            text_embeds_cloth=prompt_embeds_c.to(device, precision),
+                            cloth = garm_tensor.to(device, precision),
                             mask_image=mask,
                             image=human_img, 
                             height=1024,

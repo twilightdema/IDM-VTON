@@ -50,6 +50,10 @@ class Body(object):
             data = torch.from_numpy(im).float()
             if torch.cuda.is_available():
                 data = data.cuda()
+            elif torch.backends.mps.is_available():  
+                mps_device = torch.device("mps:0")  
+                data = data.to(mps_device)  
+
             # data = data.permute([2, 0, 1]).unsqueeze(0).float()
             with torch.no_grad():
                 Mconv7_stage6_L1, Mconv7_stage6_L2 = self.model(data)

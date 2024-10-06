@@ -336,6 +336,9 @@ class Face(object):
 
         if torch.cuda.is_available():
             x_data = x_data.cuda()
+        elif torch.backends.mps.is_available():  
+            mps_device = torch.device("mps:0")  
+            x_data = x_data.to(mps_device)  
 
         with torch.no_grad():
             hs = self.model(x_data[None, ...])
