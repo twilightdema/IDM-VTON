@@ -323,6 +323,7 @@ def main():
     unet_encoder = UNet2DConditionModel_ref.from_pretrained(args.pretrained_garmentnet_path, subfolder="unet")
     unet_encoder.config.addition_embed_type = None
     unet_encoder.config["addition_embed_type"] = None
+    print(f'args.image_encoder_path = {args.image_encoder_path}')
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_path)
 
     #customize unet start
