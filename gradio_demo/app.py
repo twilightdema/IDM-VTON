@@ -31,6 +31,12 @@ import gc
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = 'cpu'
 
+DEBUG = False
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
+
 def pil_to_binary_mask(pil_image, threshold=0):
     np_image = np.array(pil_image)
     grayscale_image = Image.fromarray(np_image).convert("L")
@@ -124,7 +130,7 @@ pipe = TryonPipeline.from_pretrained(
 pipe.unet_encoder = UNet_Encoder
 
 def print_gpu_mem(text: str):
-    print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
+    _debug_print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
 
 def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_steps,seed):
     

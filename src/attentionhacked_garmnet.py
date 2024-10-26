@@ -25,6 +25,11 @@ from diffusers.models.embeddings import SinusoidalPositionalEmbedding
 from diffusers.models.lora import LoRACompatibleLinear
 from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm
 
+DEBUG = False
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
 
 def _chunked_feed_forward(
     ff: nn.Module, hidden_states: torch.Tensor, chunk_dim: int, chunk_size: int, lora_scale: Optional[float] = None
@@ -348,22 +353,45 @@ class BasicTransformerBlock(nn.Module):
             hidden_states = self.fuser(hidden_states, gligen_kwargs["objs"])
 
         # 3. Cross-Attention
+        _debug_print(f'>>>>>>>>>>>>>>>> hidden_states.shape = {hidden_states.shape}')
+        _debug_print(f'>>>>>>>>>>>>>>>> hidden_states.dtype = {hidden_states.dtype}')
         if self.attn2 is not None:
             if self.use_ada_layer_norm:
                 norm_hidden_states = self.norm2(hidden_states, timestep)
+                _debug_print(f'>>>>>>>>>>> (0) norm_hidden_states.dtype = {norm_hidden_states.dtype}')                
             elif self.use_ada_layer_norm_zero or self.use_layer_norm:
                 norm_hidden_states = self.norm2(hidden_states)
+                _debug_print(f'>>>>>>>>>>> (1) norm_hidden_states.dtype = {norm_hidden_states.dtype}')                
             elif self.use_ada_layer_norm_single:
                 # For PixArt norm2 isn't applied here:
                 # https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L70C1-L76C103
                 norm_hidden_states = hidden_states
+                _debug_print(f'>>>>>>>>>>> (2) norm_hidden_states.dtype = {norm_hidden_states.dtype}')                
             elif self.use_ada_layer_norm_continuous:
                 norm_hidden_states = self.norm2(hidden_states, added_cond_kwargs["pooled_text_emb"])
+                _debug_print(f'>>>>>>>>>>> (3) norm_hidden_states.dtype = {norm_hidden_states.dtype}')                
             else:
                 raise ValueError("Incorrect norm")
 
+            # TODO(chulayuth) Seems like self.norm2 always produce float32 dtype.
+            # So we need to cast here. But cleaner fix is to have the layer use the correct dtype.
+            norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
+
+            _debug_print(f'>>>>>>>>>>> self.pos_embed = {self.pos_embed}')
+            _debug_print(f'>>>>>>>>>>> self.use_ada_layer_norm_single = {self.use_ada_layer_norm_single}')
+
             if self.pos_embed is not None and self.use_ada_layer_norm_single is False:
                 norm_hidden_states = self.pos_embed(norm_hidden_states)
+
+            if norm_hidden_states is not None:
+                _debug_print(f'>>>>>>>>>>>>> norm_hidden_states.dtype = {norm_hidden_states.dtype}')
+                _debug_print(f'>>>>>>>>>>>>> norm_hidden_states.shape = {norm_hidden_states.shape}')
+            if encoder_hidden_states is not None:
+                _debug_print(f'>>>>>>>>>>>>> encoder_hidden_states.dtype = {encoder_hidden_states.dtype}')
+                _debug_print(f'>>>>>>>>>>>>> encoder_hidden_states.shape = {encoder_hidden_states.shape}')
+            if encoder_attention_mask is not None:
+                _debug_print(f'>>>>>>>>>>>>> encoder_attention_mask.dtype = {encoder_attention_mask.dtype}')
+                _debug_print(f'>>>>>>>>>>>>> encoder_attention_mask.shape = {encoder_attention_mask.shape}')
 
             attn_output = self.attn2(
                 norm_hidden_states,

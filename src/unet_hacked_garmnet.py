@@ -58,6 +58,11 @@ from diffusers.models.transformer_2d import Transformer2DModel
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+DEBUG = False
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
 
 def zero_module(module):
     for p in module.parameters():
@@ -1044,10 +1049,24 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
 
         t_emb = self.time_proj(timesteps)
 
+        # TODO(chulayuth) self.time_embedding uses TimestepEmbedding which might be fp32
+        _debug_print(f'>>>>>> self.time_embedding.linear_1.weight.dtype = {self.time_embedding.linear_1.weight.dtype}')
+        time_embedding_dtype = self.time_embedding.linear_1.weight.dtype
+
         # `Timesteps` does not contain any weights and will always return f32 tensors
         # but time_embedding might actually be running in fp16. so we need to cast here.
         # there might be better ways to encapsulate this.
-        t_emb = t_emb.to(dtype=sample.dtype)
+        _debug_print(f'>>>>>> (0) t_emb.shape = {t_emb.shape}')
+        _debug_print(f'>>>>>> (0) t_emb.dtype = {t_emb.dtype}')
+        # t_emb = t_emb.to(dtype=sample.dtype)
+        t_emb = t_emb.to(dtype=time_embedding_dtype)
+
+        if t_emb is not None:
+            _debug_print(f'>>>>>> t_emb.shape = {t_emb.shape}')
+            _debug_print(f'>>>>>> t_emb.dtype = {t_emb.dtype}')
+        if timestep_cond is not None:
+            _debug_print(f'>>>>>> timestep_cond.shape = {timestep_cond.shape}')
+            _debug_print(f'>>>>>> timestep_cond.dtype = {timestep_cond.dtype}')
 
         emb = self.time_embedding(t_emb, timestep_cond)
         aug_emb = None
@@ -1071,8 +1090,10 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 emb = emb + class_emb
 
         if self.config.addition_embed_type == "text":
+            _debug_print(f'>>>>>>> config.addition_embed_type == "text')
             aug_emb = self.add_embedding(encoder_hidden_states)
         elif self.config.addition_embed_type == "text_image":
+            _debug_print(f'>>>>>>> config.addition_embed_type == "text_image')
             # Kandinsky 2.1 - style
             if "image_embeds" not in added_cond_kwargs:
                 raise ValueError(
@@ -1083,6 +1104,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             text_embs = added_cond_kwargs.get("text_embeds", encoder_hidden_states)
             aug_emb = self.add_embedding(text_embs, image_embs)
         elif self.config.addition_embed_type == "text_time":
+            _debug_print(f'>>>>>>> config.addition_embed_type == "image_embeds')
             # SDXL - style
             if "text_embeds" not in added_cond_kwargs:
                 raise ValueError(
@@ -1100,6 +1122,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             add_embeds = add_embeds.to(emb.dtype)
             aug_emb = self.add_embedding(add_embeds)
         elif self.config.addition_embed_type == "image":
+            _debug_print(f'>>>>>>> config.addition_embed_type == "image')
             # Kandinsky 2.2 - style
             if "image_embeds" not in added_cond_kwargs:
                 raise ValueError(
@@ -1108,6 +1131,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             image_embs = added_cond_kwargs.get("image_embeds")
             aug_emb = self.add_embedding(image_embs)
         elif self.config.addition_embed_type == "image_hint":
+            _debug_print(f'>>>>>>> config.addition_embed_type == "image_hint')
             # Kandinsky 2.2 - style
             if "image_embeds" not in added_cond_kwargs or "hint" not in added_cond_kwargs:
                 raise ValueError(
@@ -1186,6 +1210,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             down_intrablock_additional_residuals = down_block_additional_residuals
             is_adapter = True
 
+        _debug_print(f'>>>>>>>> before down_block_res_samples, sample.shape = {sample.shape}')
+        _debug_print(f'>>>>>>>> before down_block_res_samples, sample.dtype = {sample.dtype}')
+
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
@@ -1193,6 +1220,17 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 additional_residuals = {}
                 if is_adapter and len(down_intrablock_additional_residuals) > 0:
                     additional_residuals["additional_residuals"] = down_intrablock_additional_residuals.pop(0)
+
+                if emb is not None:
+                    _debug_print(f'>>>>>>>> downsample_block, emb.shape = {emb.shape}')
+                if encoder_hidden_states is not None:
+                    _debug_print(f'>>>>>>>> downsample_block, encoder_hidden_states.shape = {encoder_hidden_states.shape}')
+                if attention_mask is not None:
+                    _debug_print(f'>>>>>>>> downsample_block, attention_mask.shape = {attention_mask.shape}')
+                if cross_attention_kwargs is not None:
+                    _debug_print(f'>>>>>>>> downsample_block, cross_attention_kwargs.shape = {cross_attention_kwargs.shape}')
+                if encoder_attention_mask is not None:
+                    _debug_print(f'>>>>>>>> downsample_block, encoder_attention_mask.shape = {encoder_attention_mask.shape}')
 
                 sample, res_samples,out_garment_feat = downsample_block(
                     hidden_states=sample,
@@ -1251,6 +1289,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             sample = sample + mid_block_additional_residual
 
 
+        _debug_print(f'>>>>>>>>> Before upsampling, sample.shape = {sample.shape}')
+
 
         # 5. up
         for i, upsample_block in enumerate(self.up_blocks):
@@ -1259,12 +1299,17 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
+            _debug_print(f'>>>>>>>>> Upsampling[{i}], sample.shape = {sample.shape}')
+            _debug_print(f'>>>>>>>>> Upsampling[{i}], res_samples[-1].shape = {res_samples[-1].shape}')
+
             # if we have not reached the final block and need to forward the
             # upsample size, we do it here
             if not is_final_block and forward_upsample_size:
+                _debug_print(f'>>>>>>> not is_final_block and forward_upsample_size')
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
+                _debug_print(f'>>>>>>> upsample_block.has_cross_attention')
                 sample,out_garment_feat = upsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -1276,6 +1321,14 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_attention_mask=encoder_attention_mask,
                 )
                 garment_features += out_garment_feat
+            else:
+                # Chulayuth: Even without cross attention, we still need to upsampling the 'sample'.
+                sample = upsample_block(
+                    hidden_states=sample, 
+                    temb=emb, 
+                    res_hidden_states_tuple=res_samples,
+                    scale=lora_scale,
+                )
 
 
         if not return_dict:

@@ -26,7 +26,16 @@ from tqdm.auto import tqdm
 from diffusers.training_utils import compute_snr
 import torchvision.transforms.functional as TF
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+DEBUG = False
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
+
+def print_gpu_mem(text: str):
+    _debug_print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
 
 class VitonHDDataset(data.Dataset):
     def __init__(
@@ -260,8 +269,8 @@ def parse_args():
     parser.add_argument("--pretrained_ip_adapter_path",type=str,default="ckpt/ip_adapter/ip-adapter-plus_sdxl_vit-h.bin",help="Path to pretrained ip adapter model. If not specified weights are initialized randomly.",)
     parser.add_argument("--image_encoder_path",type=str,default="ckpt/image_encoder",required=False,help="Path to CLIP image encoder",)
     parser.add_argument("--gradient_checkpointing",action="store_true",help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",)
-    parser.add_argument("--width",type=int,default=768,)
-    parser.add_argument("--height",type=int,default=1024,)
+    parser.add_argument("--width",type=int,default=384,)
+    parser.add_argument("--height",type=int,default=512,)
     parser.add_argument("--gradient_accumulation_steps",type=int,default=1,help="Number of updates steps to accumulate before performing a backward/update pass.",)
     parser.add_argument("--logging_steps",type=int,default=1000,help=("Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"" training using `--resume_from_checkpoint`."),)
     parser.add_argument("--output_dir",type=str,default="output",help="The output directory where the model predictions and checkpoints will be written.",)
@@ -340,6 +349,9 @@ def main():
     adapter_modules = torch.nn.ModuleList(unet.attn_processors.values())
     adapter_modules.load_state_dict(state_dict["ip_adapter"],strict=True)
 
+    _debug_print(f'>>>>. image_encoder.config = {image_encoder.config}')
+
+    print_gpu_mem('Step 0 - Before loading image_proj_model')
     #ip-adapter
     image_proj_model = Resampler(
         dim=image_encoder.config.hidden_size,
@@ -351,6 +363,7 @@ def main():
         output_dim=unet.config.cross_attention_dim,
         ff_mult=4,
     ).to(accelerator.device, dtype=torch.float32)
+    print_gpu_mem('Step 1 - After loading image_proj_model')
 
     image_proj_model.load_state_dict(state_dict["image_proj"], strict=True)
     image_proj_model.requires_grad_(True)
@@ -380,11 +393,19 @@ def main():
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
+
+    _debug_print(f'>>>>>>> weight_dtype = {weight_dtype}')
+    
+    print_gpu_mem('Step 3 - Before loading vae')
     vae.to(accelerator.device) 
+    print_gpu_mem('Step 4 - Before loading text_encoder')
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     text_encoder_2.to(accelerator.device, dtype=weight_dtype)
+    print_gpu_mem('Step 5 - Before loading image_encoder')
     image_encoder.to(accelerator.device, dtype=weight_dtype)
+    print_gpu_mem('Step 6 - Before loading unet_encoder')
     unet_encoder.to(accelerator.device, dtype=weight_dtype)
+    print_gpu_mem('Step 7 - After loading unet_encoder')
 
 
     vae.requires_grad_(False)
@@ -490,7 +511,9 @@ def main():
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet), accelerator.accumulate(image_proj_model):
-                if global_step % args.logging_steps == 0:
+
+                # Just don't do logging to save GPU memory!.
+                if False: # global_step % args.logging_steps == 0:
                     if accelerator.is_main_process:
                         with torch.no_grad():
                             with torch.cuda.amp.autocast():
@@ -600,6 +623,10 @@ def main():
                 model_input = vae.encode(pixel_values).latent_dist.sample()
                 model_input = model_input * vae.config.scaling_factor
 
+                _debug_print(f'>>>>>>>>>>>>>>> batch["image"].shape = {batch["image"].shape}')
+                _debug_print(f'>>>>>>>>>>>>>>> batch["pose_img"].shape = {batch["pose_img"].shape}')
+                _debug_print(f'>>>>>>>>>>>>>>> batch["inpaint_mask"].shape = {batch["inpaint_mask"].shape}')
+
                 masked_latents = vae.encode(
                     batch["im_mask"].reshape(batch["image"].shape).to(dtype=vae.dtype)
                 ).latent_dist.sample()
@@ -612,8 +639,22 @@ def main():
                     ]
                 )
                 mask = mask.reshape(-1, 1, args.height // 8, args.width // 8)
+                _debug_print(f'>>>>>>>>>>>>>>> (After resized) mask.shape = {mask.shape}')
 
-                pose_map = vae.encode(batch["pose_img"].to(dtype=vae.dtype)).latent_dist.sample()
+                # We also need to resize the pose_img to match the training image
+                pose_img = batch["pose_img"]
+                pose_img = torch.stack(
+                    [
+                        torch.nn.functional.interpolate(pose_img, size=(args.height, args.width))
+                    ]
+                )
+                _debug_print(f'>>>>>>>>>>>>>>> (After resized-0) pose_img.shape = {pose_img.shape}')
+                pose_img = pose_img.reshape(1, -1, args.height, args.width)
+                _debug_print(f'>>>>>>>>>>>>>>> (After resized-1) pose_img.shape = {pose_img.shape}')
+
+                pose_map = vae.encode(pose_img.to(dtype=vae.dtype)).latent_dist.sample()
+                _debug_print(f'>>>>>>>>>>>>>>> (Before scaled) pose_map.shape = {pose_map.shape}')
+                _debug_print(f'>>>>>>>>>>>>>>> vae.config.scaling_factor = {vae.config.scaling_factor}')
                 pose_map = pose_map * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
@@ -625,6 +666,11 @@ def main():
                     )
                 # Add noise to the latents according to the noise magnitude at each timestep
                 noisy_latents = noise_scheduler.add_noise(model_input, noise, timesteps)
+
+                _debug_print(f'>>>>>>>>>>>>>>> noisy_latents.shape = {noisy_latents.shape}')
+                _debug_print(f'>>>>>>>>>>>>>>> mask.shape = {mask.shape}')
+                _debug_print(f'>>>>>>>>>>>>>>> masked_latents.shape = {masked_latents.shape}')
+                _debug_print(f'>>>>>>>>>>>>>>> pose_map.shape = {pose_map.shape}')
                 latent_model_input = torch.cat([noisy_latents, mask,masked_latents,pose_map], dim=1)
             
             
@@ -656,7 +702,9 @@ def main():
                     target_size = (args.height, args.height) 
                     add_time_ids = list(original_size + crops_coords_top_left + target_size)
                     add_time_ids = torch.tensor([add_time_ids])
+                    print_gpu_mem('Step 12 - Before loading add_time_ids')
                     add_time_ids = add_time_ids.to(accelerator.device)
+                    print_gpu_mem('Step 13 - After loading add_time_ids')
                     return add_time_ids
                 
                 add_time_ids = torch.cat(
@@ -677,7 +725,9 @@ def main():
                 unet_added_cond_kwargs = {"text_embeds": pooled_text_embeds, "time_ids": add_time_ids}
                 unet_added_cond_kwargs["image_embeds"] = ip_tokens
 
+                print_gpu_mem('Step 14 - Before loading cloth_values')
                 cloth_values = batch["cloth_pure"].to(accelerator.device,dtype=vae.dtype)
+                print_gpu_mem('Step 15 - After loading cloth_values')
                 cloth_values = vae.encode(cloth_values).latent_dist.sample()
                 cloth_values = cloth_values * vae.config.scaling_factor
 
@@ -698,9 +748,13 @@ def main():
                 ).input_ids
 
             
+                print_gpu_mem('Step 16 - Before loading text_input_ids')
                 encoder_output = text_encoder(text_input_ids.to(accelerator.device), output_hidden_states=True)
+                print_gpu_mem('Step 17 - After loading text_input_ids')
                 text_embeds_cloth = encoder_output.hidden_states[-2]
+                print_gpu_mem('Step 18 - Before loading text_input_ids_2')
                 encoder_output_2 = text_encoder_2(text_input_ids_2.to(accelerator.device), output_hidden_states=True)
+                print_gpu_mem('Step 19 - After loading text_input_ids_2')
                 text_embeds_2_cloth = encoder_output_2.hidden_states[-2]
                 text_embeds_cloth = torch.concat([text_embeds_cloth, text_embeds_2_cloth], dim=-1) # concat
 

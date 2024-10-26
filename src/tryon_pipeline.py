@@ -57,7 +57,11 @@ from diffusers.utils import (
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
+DEBUG = False
 
+def _debug_print(s):
+    if DEBUG:
+        print(s)
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -521,7 +525,7 @@ class StableDiffusionXLInpaintPipeline(
         return image_embeds
 
     def print_gpu_mem(self, text: str):
-        print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
+        _debug_print(f'>>>>> GPU Usage: {text} : {torch.cuda.memory_allocated() / 1e6 / 1e3}GB, max: {torch.cuda.max_memory_allocated() / 1e6 / 1e3}GB, reserved: {torch.cuda.memory_reserved() / 1e6 / 1e3}GB')
 
     def cleanup_gpu(self):
         gc.collect()
@@ -632,6 +636,9 @@ class StableDiffusionXLInpaintPipeline(
             self.push_module_to_gpu(text_encoder, device)
         self.print_gpu_mem('tokenizer.to(device)')
 
+        if pooled_prompt_embeds is not None:
+            _debug_print(f'>>>>>>>>>>>>>[1] pooled_prompt_embeds.shape = {pooled_prompt_embeds.shape}')
+
         if prompt_embeds is None:
             prompt_2 = prompt_2 or prompt
             prompt_2 = [prompt_2] if isinstance(prompt_2, str) else prompt_2
@@ -663,19 +670,32 @@ class StableDiffusionXLInpaintPipeline(
                         f" {tokenizer.model_max_length} tokens: {removed_text}"
                     )
 
+                _debug_print(f'>>>>>>>>>>>>>[2] text_input_ids.shape = {text_input_ids.shape}')
                 prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
 
-                # We are only ALWAYS interested in the pooled output of the final text encoder
-                pooled_prompt_embeds = prompt_embeds[0]
+                if hasattr(prompt_embeds, 'text_embeds'):
+                    # Case of 2nd text_embedding of SDXL, which often captures overall style.
+                    _debug_print(f'>>>>>>>>>>>>>[2.X] prompt_embeds.text_embeds.shape = {prompt_embeds.text_embeds.shape}')
+                    # We are only ALWAYS interested in the pooled output of the final text encoder
+                    pooled_prompt_embeds = prompt_embeds[0]
+                if hasattr(prompt_embeds, 'pooler_output'):
+                    # For SD1.5, there is only single text_embedding, so we use the pooled output of it instead.
+                    _debug_print(f'>>>>>>>>>>>>>[2.X] prompt_embeds.pooler_output.shape = {prompt_embeds.pooler_output.shape}')
+                    pooled_prompt_embeds = prompt_embeds.pooler_output
+
+                _debug_print(f'>>>>>>>>>>>>>[2] pooled_prompt_embeds.shape = {pooled_prompt_embeds.shape}')
+                _debug_print(f'>>>>>>>>>>>>>[2] clip_skip = {clip_skip}')
                 if clip_skip is None:
                     prompt_embeds = prompt_embeds.hidden_states[-2]
                 else:
                     # "2" because SDXL always indexes from the penultimate layer.
                     prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
+                _debug_print(f'>>>>>>>>>>>>>[2] prompt_embeds.shape = {prompt_embeds.shape}')
 
                 prompt_embeds_list.append(prompt_embeds)
 
             prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
+            _debug_print(f'>>>>>>>>>>>>>[3] prompt_embeds.shape = {prompt_embeds.shape}')
 
         # get unconditional embeddings for classifier free guidance
         zero_out_negative_prompt = negative_prompt is None and self.config.force_zeros_for_empty_prompt
@@ -725,8 +745,17 @@ class StableDiffusionXLInpaintPipeline(
                     uncond_input.input_ids.to(device),
                     output_hidden_states=True,
                 )
-                # We are only ALWAYS interested in the pooled output of the final text encoder
-                negative_pooled_prompt_embeds = negative_prompt_embeds[0]
+
+                if hasattr(negative_prompt_embeds, 'text_embeds'):
+                    # Case of 2nd text_embedding of SDXL, which often captures overall style.
+                    _debug_print(f'>>>>>>>>>>>>>[2.X] negative_prompt_embeds.text_embeds.shape = {negative_prompt_embeds.text_embeds.shape}')
+                    # We are only ALWAYS interested in the pooled output of the final text encoder
+                    negative_pooled_prompt_embeds = negative_prompt_embeds[0]
+                if hasattr(negative_prompt_embeds, 'pooler_output'):
+                    # For SD1.5, there is only single text_embedding, so we use the pooled output of it instead.
+                    _debug_print(f'>>>>>>>>>>>>>[2.X] negative_prompt_embeds.pooler_output.shape = {negative_prompt_embeds.pooler_output.shape}')
+                    negative_pooled_prompt_embeds = negative_prompt_embeds.pooler_output
+
                 negative_prompt_embeds = negative_prompt_embeds.hidden_states[-2]
 
                 negative_prompt_embeds_list.append(negative_prompt_embeds)
@@ -755,9 +784,15 @@ class StableDiffusionXLInpaintPipeline(
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
             negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
-        pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
+        _debug_print(f'>>>>>>>>>>>> pooled_prompt_embeds.shape = {pooled_prompt_embeds.shape}')
+        _debug_print(f'>>>>>>>>>>>> num_images_per_prompt = {num_images_per_prompt}')
+        _debug_print(f'>>>>>>>>>>>> bs_embed = {bs_embed}')
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
+        _debug_print(f'>>>>>>>>>>>> pooled_prompt_embeds.shape (2) = {pooled_prompt_embeds.shape}')
+        pooled_prompt_embeds = pooled_prompt_embeds.view(
             bs_embed * num_images_per_prompt, -1
         )
+        _debug_print(f'>>>>>>>>>>>> pooled_prompt_embeds.shape (3) = {pooled_prompt_embeds.shape}')
         if do_classifier_free_guidance:
             negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
                 bs_embed * num_images_per_prompt, -1
@@ -925,7 +960,9 @@ class StableDiffusionXLInpaintPipeline(
             image_latents = image_latents.repeat(batch_size // image_latents.shape[0], 1, 1, 1)
 
         if latents is None and add_noise:
+            _debug_print(f'>>>>>>>>>>> prepare_latents=> device = {device}')
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            _debug_print(f'>>>>>>>>>>> prepare_latents=> device = {device} (2)')
             # if strength is 1. then initialise the latents to noise, else initial to image + noise
             latents = noise if is_strength_max else self.scheduler.add_noise(image_latents, noise, timestep)
             # if pure noise then scale the initial latents by the  Scheduler's init sigma
@@ -945,6 +982,7 @@ class StableDiffusionXLInpaintPipeline(
         if return_image_latents:
             outputs += (image_latents,)
 
+        _debug_print(f'>>>>>>>>>>> prepare_latents=> device = {device} (3)')
         return outputs
 
     def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
@@ -1649,6 +1687,8 @@ class StableDiffusionXLInpaintPipeline(
         return_image_latents = num_channels_unet == 4
 
         add_noise = True if self.denoising_start is None else False
+
+        _debug_print(f'>>>>>>>>>>>>>> prepare_latents is called with device = {device}')
         latents_outputs = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
@@ -1672,6 +1712,7 @@ class StableDiffusionXLInpaintPipeline(
             latents, noise = latents_outputs
 
         # 7. Prepare mask latent variables
+        _debug_print(f'>>>>>>>>>>>>>> prepare_mask_latents is called with device = {device}')
         mask, masked_image_latents = self.prepare_mask_latents(
             mask,
             masked_image,
@@ -1683,9 +1724,13 @@ class StableDiffusionXLInpaintPipeline(
             generator,
             self.do_classifier_free_guidance,
         )
+        _debug_print(f'>>>>>>>>>>>>>> BEFORE calling pose_img.to(device=device, dtype=prompt_embeds.dtype)')
         pose_img = pose_img.to(device=device, dtype=prompt_embeds.dtype)
 
+        _debug_print(f'>>>>>>>>>>>>>> BEFORE calling self.vae.encode(pose_img).latent_dist.sample()')
+        _debug_print(f'>>>>>>>>>> pose_img.shape = {pose_img.shape}')
         pose_img = self.vae.encode(pose_img).latent_dist.sample()
+        _debug_print(f'>>>>>>>>>>>>>> AFTER calling self.vae.encode(pose_img).latent_dist.sample()')
         pose_img = pose_img * self.vae.config.scaling_factor
 
         # pose_img = self._encode_vae_image(pose_img, generator=generator)
@@ -1693,6 +1738,7 @@ class StableDiffusionXLInpaintPipeline(
         pose_img = (
                 torch.cat([pose_img] * 2) if self.do_classifier_free_guidance else pose_img
         )
+        _debug_print(f'>>>>>>>>>>>>>> before calling _encode_vae_image')
         cloth = self._encode_vae_image(cloth, generator=generator)
 
         # # 8. Check that sizes of mask, masked image and latents match
@@ -1735,6 +1781,7 @@ class StableDiffusionXLInpaintPipeline(
         else:
             text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
 
+        _debug_print(f'>>>>>>>>>>>>>> before calling _get_add_time_ids')
         add_time_ids, add_neg_time_ids = self._get_add_time_ids(
             original_size,
             crops_coords_top_left,

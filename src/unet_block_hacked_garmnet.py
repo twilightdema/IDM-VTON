@@ -30,6 +30,11 @@ from einops import rearrange
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+DEBUG = False
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
 
 def get_down_block(
     down_block_type: str,
@@ -1060,8 +1065,15 @@ class CrossAttnDownBlock2D(nn.Module):
         if isinstance(transformer_layers_per_block, int):
             transformer_layers_per_block = [transformer_layers_per_block] * num_layers
 
+        _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: num_layers = {num_layers}')
+        _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: resnet_groups = {resnet_groups}')
+        _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: cross_attention_dim = {cross_attention_dim}')
         for i in range(num_layers):
             in_channels = in_channels if i == 0 else out_channels
+            _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: layers[{i}].in_channels = {in_channels}')
+            _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: layers[{i}].out_channels = {out_channels}')
+            _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: layers[{i}].temb_channels = {temb_channels}')
+
             resnets.append(
                 ResnetBlock2D(
                     in_channels=in_channels,
@@ -1077,6 +1089,7 @@ class CrossAttnDownBlock2D(nn.Module):
                 )
             )
             if not dual_cross_attention:
+                _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: layers[{i}].Transformer2DModel.num_attention_heads = {num_attention_heads}')
                 attentions.append(
                     Transformer2DModel(
                         num_attention_heads,
@@ -1092,6 +1105,7 @@ class CrossAttnDownBlock2D(nn.Module):
                     )
                 )
             else:
+                _debug_print(f'>>>>>>>>> CrossAttnDownBlock2D: layers[{i}].DualTransformer2DModel.num_attention_heads = {num_attention_heads}')
                 attentions.append(
                     DualTransformer2DModel(
                         num_attention_heads,
@@ -1163,7 +1177,18 @@ class CrossAttnDownBlock2D(nn.Module):
                 )
                 hidden_states=hidden_states[0]
             else:
+                _debug_print(f'>>>>> before resnet: hidden_states.shape = {hidden_states.shape}')
+                _debug_print(f'>>>>> before resnet: temb.shape = {temb.shape}')
                 hidden_states = resnet(hidden_states, temb, scale=lora_scale)
+                _debug_print(f'>>>>> after resnet: hidden_states.shape = {hidden_states.shape}')
+                if encoder_hidden_states is not None:
+                    _debug_print(f'>>>>> after resnet: encoder_hidden_states.shape = {encoder_hidden_states.shape}')
+                if cross_attention_kwargs is not None:
+                    _debug_print(f'>>>>> after resnet: cross_attention_kwargs.shape = {cross_attention_kwargs.shape}')
+                if attention_mask is not None:
+                    _debug_print(f'>>>>> after resnet: attention_mask.shape = {attention_mask.shape}')
+                if encoder_attention_mask is not None:
+                    _debug_print(f'>>>>> after resnet: encoder_attention_mask.shape = {encoder_attention_mask.shape}')
                 hidden_states,out_garment_feat = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -1173,10 +1198,14 @@ class CrossAttnDownBlock2D(nn.Module):
                     return_dict=False,
                 )
                 hidden_states=hidden_states[0]
+                _debug_print(f'>>>>> after attn: hidden_states.shape = {hidden_states.shape}')
+                # _debug_print(f'>>>>> after attn: out_garment_feat.shape = {out_garment_feat.shape}')
+                
             garment_features += out_garment_feat
             # apply additional residuals to the output of the last pair of resnet and attention blocks
             if i == len(blocks) - 1 and additional_residuals is not None:
                 hidden_states = hidden_states + additional_residuals
+                _debug_print(f'>>>>> after last_residue: hidden_states.shape = {hidden_states.shape}')
 
             output_states = output_states + (hidden_states,)
 
@@ -2340,6 +2369,7 @@ class CrossAttnUpBlock2D(nn.Module):
             # print(hidden_states.shape)
             # print(encoder_hidden_states.shape)
             if self.training and self.gradient_checkpointing:
+                _debug_print(f'>>>>>>> Upsampling_1')
 
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
@@ -2367,6 +2397,7 @@ class CrossAttnUpBlock2D(nn.Module):
                 )
                 hidden_states=hidden_states[0]
             else:
+                _debug_print(f'>>>>>>> Upsampling_2')
                 hidden_states = resnet(hidden_states, temb, scale=lora_scale)
                 hidden_states,out_garment_feat = attn(
                     hidden_states,
@@ -2382,6 +2413,7 @@ class CrossAttnUpBlock2D(nn.Module):
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size, scale=lora_scale)
 
+        _debug_print(f'>>>>>>> Upsampling return hidden_states.shape = {hidden_states.shape}')
         return hidden_states,garment_features
 
 
