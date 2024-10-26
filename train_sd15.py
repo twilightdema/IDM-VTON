@@ -358,9 +358,9 @@ def main():
     #customize unet start
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet",low_cpu_mem_usage=False, device_map=None)
     unet.config.encoder_hid_dim = image_encoder.config.hidden_size
-    unet.config.encoder_hid_dim_type = "ip_image_proj"
+    unet.config.encoder_hid_dim_type = "ip_image_proj_sd15"  # (chulayuth): Use the new _sd15 suffix because SDXL and SD15 use different IPAdaptor projection shapes.
     unet.config["encoder_hid_dim"] = image_encoder.config.hidden_size
-    unet.config["encoder_hid_dim_type"] = "ip_image_proj"
+    unet.config["encoder_hid_dim_type"] = "ip_image_proj_sd15"  # (chulayuth): Use the new _sd15 suffix because SDXL and SD15 use different IPAdaptor projection shapes.
 
 
     state_dict = torch.load(args.pretrained_ip_adapter_path, map_location="cpu")

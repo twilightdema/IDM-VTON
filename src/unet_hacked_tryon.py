@@ -472,12 +472,35 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 cross_attention_dim=cross_attention_dim,
             )
         elif encoder_hid_dim_type == "ip_image_proj":
+            # TODO(chulayuth) Revert, otherwise the SDXL will not work anymore.
+            # self.encoder_hid_proj = Resampler(
+            #     dim=768,
+            #     depth=4,
+            #     dim_head=64,
+            #     heads=12,
+            #     num_queries=16,
+            #     embedding_dim=encoder_hid_dim,
+            #     output_dim=self.config.cross_attention_dim,
+            #     ff_mult=4,
+            # )
             # Kandinsky 2.2
             self.encoder_hid_proj = Resampler(
                 dim=1280,
                 depth=4,
                 dim_head=64,
                 heads=20,
+                num_queries=16,
+                embedding_dim=encoder_hid_dim,
+                output_dim=self.config.cross_attention_dim,
+                ff_mult=4,
+            )
+        elif encoder_hid_dim_type == "ip_image_proj_sd15":
+            # (chulayuth) Use the IPAdaptor shapes for SD15
+            self.encoder_hid_proj = Resampler(
+                dim=768,
+                depth=4,
+                dim_head=64,
+                heads=12,
                 num_queries=16,
                 embedding_dim=encoder_hid_dim,
                 output_dim=self.config.cross_attention_dim,
