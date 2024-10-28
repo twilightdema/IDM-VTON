@@ -45,6 +45,13 @@ from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
 
 logger = get_logger(__name__, log_level="INFO")
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+DEBUG = True
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
 
 
 def parse_args():
@@ -312,6 +319,8 @@ def main():
         batch_size=args.test_batch_size,
         num_workers=4,
     )
+
+    _debug_print(f'>>>>>>>>>>>>> accelerator.device = {accelerator.device}')
 
     pipe = TryonPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
