@@ -64,6 +64,13 @@ from ip_adapter.ip_adapter import Resampler
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+DEBUG = True
+
+def _debug_print(s):
+    if DEBUG:
+        print(s)
+
+
 # def FeedForward(dim, mult=4):
 #     inner_dim = int(dim * mult)
 #     return nn.Sequential(
@@ -543,6 +550,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             self.class_embedding = nn.Linear(projection_class_embeddings_input_dim, time_embed_dim)
         else:
             self.class_embedding = None
+
+        _debug_print(f'>>>>>>>>>>> unet_hacked_tryon.py: addition_embed_type = {addition_embed_type}')
 
         if addition_embed_type == "text":
             if encoder_hid_dim is not None:
@@ -1258,6 +1267,15 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             if "image_embeds" not in added_cond_kwargs:
                 raise ValueError(
                     f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'ip_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            # print(image_embeds.shape)
+            # image_embeds = self.encoder_hid_proj(image_embeds).to(encoder_hidden_states.dtype)
+            encoder_hidden_states = torch.cat([encoder_hidden_states, image_embeds], dim=1)
+        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "ip_image_proj_sd15":
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'ip_image_proj_sd15' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
                 )
             image_embeds = added_cond_kwargs.get("image_embeds")
             # print(image_embeds.shape)

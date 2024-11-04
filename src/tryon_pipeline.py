@@ -57,7 +57,7 @@ from diffusers.utils import (
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-DEBUG = False
+DEBUG = True
 
 def _debug_print(s):
     if DEBUG:
@@ -626,10 +626,14 @@ class StableDiffusionXLInpaintPipeline(
             batch_size = prompt_embeds.shape[0]
 
         # Define tokenizers and text encoders
-        tokenizers = [self.tokenizer, self.tokenizer_2] if self.tokenizer is not None else [self.tokenizer_2]
-        text_encoders = (
-            [self.text_encoder, self.text_encoder_2] if self.text_encoder is not None else [self.text_encoder_2]
-        )
+        if self.tokenizer_2 is None:  # (chulayuth) SD15 does not ahve tokenizer_2.
+            tokenizers = [self.tokenizer]
+            text_encoders = [self.text_encoder]
+        else:
+            tokenizers = [self.tokenizer, self.tokenizer_2] if self.tokenizer is not None else [self.tokenizer_2]
+            text_encoders = (
+                [self.text_encoder, self.text_encoder_2] if self.text_encoder is not None else [self.text_encoder_2]
+            )
 
         for tokenizer, text_encoder in zip(tokenizers, text_encoders):
             # self.push_module_to_gpu(tokenizer, device)
@@ -971,6 +975,7 @@ class StableDiffusionXLInpaintPipeline(
             noise = latents.to(device)
             latents = noise * self.scheduler.init_noise_sigma
         else:
+            _debug_print(f'>>>>>>>>>>> prepare_latents=> device = {device} (3)')
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
             latents = image_latents.to(device)
 
@@ -1120,21 +1125,28 @@ class StableDiffusionXLInpaintPipeline(
             add_time_ids = list(original_size + crops_coords_top_left + target_size)
             add_neg_time_ids = list(negative_original_size + crops_coords_top_left + negative_target_size)
 
+        addition_time_embed_dim = self.unet.config.addition_time_embed_dim
+
+        _debug_print(f'>>>>>>>>>>>> _get_add_time_ids => addition_time_embed_dim = {addition_time_embed_dim}')
+        _debug_print(f'>>>>>>>>>>>> _get_add_time_ids => len(add_time_ids) = {len(add_time_ids)}')
+        _debug_print(f'>>>>>>>>>>>> _get_add_time_ids => text_encoder_projection_dim = {text_encoder_projection_dim}')
+
         passed_add_embed_dim = (
-            self.unet.config.addition_time_embed_dim * len(add_time_ids) + text_encoder_projection_dim
+            addition_time_embed_dim * len(add_time_ids) + text_encoder_projection_dim
         )
+
         expected_add_embed_dim = self.unet.add_embedding.linear_1.in_features
 
         if (
             expected_add_embed_dim > passed_add_embed_dim
-            and (expected_add_embed_dim - passed_add_embed_dim) == self.unet.config.addition_time_embed_dim
+            and (expected_add_embed_dim - passed_add_embed_dim) == addition_time_embed_dim
         ):
             raise ValueError(
                 f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. Please make sure to enable `requires_aesthetics_score` with `pipe.register_to_config(requires_aesthetics_score=True)` to make sure `aesthetic_score` {aesthetic_score} and `negative_aesthetic_score` {negative_aesthetic_score} is correctly used by the model."
             )
         elif (
             expected_add_embed_dim < passed_add_embed_dim
-            and (passed_add_embed_dim - expected_add_embed_dim) == self.unet.config.addition_time_embed_dim
+            and (passed_add_embed_dim - expected_add_embed_dim) == addition_time_embed_dim
         ):
             raise ValueError(
                 f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. Please make sure to disable `requires_aesthetics_score` with `pipe.register_to_config(requires_aesthetics_score=False)` to make sure `target_size` {target_size} is correctly used by the model."
@@ -1724,6 +1736,18 @@ class StableDiffusionXLInpaintPipeline(
             generator,
             self.do_classifier_free_guidance,
         )
+
+
+        # (chulayuth) We also need to resize the pose_img to match the training image
+        pose_img = torch.stack(
+            [
+                torch.nn.functional.interpolate(pose_img, size=(height, width))
+            ]
+        )
+        _debug_print(f'>>>>>>>>>>>>>>> (After resized-0) pose_img.shape = {pose_img.shape}')
+        pose_img = pose_img[0]  # (chulayuth) Remove the 1st dimension
+        _debug_print(f'>>>>>>>>>>>>>>> (After resized-1) pose_img.shape = {pose_img.shape}')
+
         _debug_print(f'>>>>>>>>>>>>>> BEFORE calling pose_img.to(device=device, dtype=prompt_embeds.dtype)')
         pose_img = pose_img.to(device=device, dtype=prompt_embeds.dtype)
 
@@ -1782,29 +1806,45 @@ class StableDiffusionXLInpaintPipeline(
             text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
 
         _debug_print(f'>>>>>>>>>>>>>> before calling _get_add_time_ids')
-        add_time_ids, add_neg_time_ids = self._get_add_time_ids(
-            original_size,
-            crops_coords_top_left,
-            target_size,
-            aesthetic_score,
-            negative_aesthetic_score,
-            negative_original_size,
-            negative_crops_coords_top_left,
-            negative_target_size,
-            dtype=prompt_embeds.dtype,
-            text_encoder_projection_dim=text_encoder_projection_dim,
-        )
-        add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+
+        # TODO(chulayuth) the time_ids things seems not used in case if addition_embed_type != 'text_time' (ex. in SD15)
+        # So we should skip all related code, otherwise it will cause problems.
+        if self.unet.config.addition_embed_type is None:
+            add_time_ids = None
+            add_neg_time_ids = None
+            add_time_ids = None
+        else:
+            add_time_ids, add_neg_time_ids = self._get_add_time_ids(
+                original_size,
+                crops_coords_top_left,
+                target_size,
+                aesthetic_score,
+                negative_aesthetic_score,
+                negative_original_size,
+                negative_crops_coords_top_left,
+                negative_target_size,
+                dtype=prompt_embeds.dtype,
+                text_encoder_projection_dim=text_encoder_projection_dim,
+            )
+            add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
 
         if self.do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-            add_neg_time_ids = add_neg_time_ids.repeat(batch_size * num_images_per_prompt, 1)
-            add_time_ids = torch.cat([add_neg_time_ids, add_time_ids], dim=0)
+            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0) 
+
+            # TODO(chulayuth) the time_ids things seems not used in case if addition_embed_type != 'text_time' (ex. in SD15)
+            # So we should skip all related code, otherwise it will cause problems.
+            if self.unet.config.addition_embed_type is not None:
+                add_neg_time_ids = add_neg_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+                add_time_ids = torch.cat([add_neg_time_ids, add_time_ids], dim=0)
 
         prompt_embeds = prompt_embeds.to(device)
+
         add_text_embeds = add_text_embeds.to(device)
-        add_time_ids = add_time_ids.to(device)
+        # TODO(chulayuth) the time_ids things seems not used in case if addition_embed_type != 'text_time' (ex. in SD15)
+        # So we should skip all related code, otherwise it will cause problems.
+        if self.unet.config.addition_embed_type is not None:
+            add_time_ids = add_time_ids.to(device)
 
         self.push_module_to_gpu(self.unet, device)
         self.print_gpu_mem('After pushing unet')

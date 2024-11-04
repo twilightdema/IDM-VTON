@@ -30,7 +30,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-DEBUG = False
+DEBUG = True
 
 def _debug_print(s):
     if DEBUG:
@@ -350,8 +350,8 @@ def main():
 
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path,subfolder="vae",torch_dtype=torch.float16,)
     unet_encoder = UNet2DConditionModel_ref.from_pretrained(args.pretrained_garmentnet_path, subfolder="unet")
-    unet_encoder.config.addition_embed_type = None
-    unet_encoder.config["addition_embed_type"] = None
+    unet_encoder.config.addition_embed_type = None # TODO(chulayuth) None seems does not match the trained checkpoint from Huggingface
+    unet_encoder.config["addition_embed_type"] = None # TODO(chulayuth) None seems does not match the trained checkpoint from Huggingface
     print(f'args.image_encoder_path = {args.image_encoder_path}')
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_path)
 
@@ -708,7 +708,7 @@ def main():
                 mask = mask.reshape(-1, 1, args.height // 8, args.width // 8)
                 _debug_print(f'>>>>>>>>>>>>>>> (After resized) mask.shape = {mask.shape}')
 
-                # We also need to resize the pose_img to match the training image
+                # (chulayuth) We also need to resize the pose_img to match the training image
                 pose_img = batch["pose_img"]
                 pose_img = torch.stack(
                     [
@@ -775,10 +775,12 @@ def main():
                 # pooled_text_embeds = encoder_output_2[0]
                 # text_embeds_2 = encoder_output_2.hidden_states[-2]
 
-                # (chulayuth) SD15 only has single text_enoder, so no need to concat.
+                # (chulayuth) SD15 only has single text_encoder, so no need to concat.
                 encoder_hidden_states = text_embeds
+
                 # encoder_hidden_states = torch.concat([text_embeds, text_embeds_2], dim=-1) # concat
                 _debug_print(f'>>>>>>>>>>>>>>>>> ***encoder_hidden_states.shape = {encoder_hidden_states.shape}')
+                exit(0)
 
 
                 def compute_time_ids(original_size, crops_coords_top_left = (0,0)):
@@ -909,6 +911,12 @@ def main():
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
+                writer.close()
+                break
+
+            # (chulayuth) Stop on NaN loss.
+            if math.isnan(logs["step_loss"]):
+                print(f'Stopped at step {global_step} due to NaN loss.')
                 writer.close()
                 break
 

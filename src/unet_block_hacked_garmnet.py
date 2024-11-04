@@ -30,7 +30,7 @@ from einops import rearrange
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-DEBUG = False
+DEBUG = True
 
 def _debug_print(s):
     if DEBUG:

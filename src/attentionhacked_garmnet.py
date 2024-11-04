@@ -25,7 +25,7 @@ from diffusers.models.embeddings import SinusoidalPositionalEmbedding
 from diffusers.models.lora import LoRACompatibleLinear
 from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm
 
-DEBUG = False
+DEBUG = True
 
 def _debug_print(s):
     if DEBUG:
@@ -400,6 +400,7 @@ class BasicTransformerBlock(nn.Module):
                 **cross_attention_kwargs,
             )
             hidden_states = attn_output + hidden_states
+
 
         # 4. Feed-forward
         if self.use_ada_layer_norm_continuous:

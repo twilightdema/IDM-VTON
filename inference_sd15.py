@@ -182,6 +182,7 @@ class VitonHDTestDataset(data.Dataset):
         pose_img = Image.open(
             os.path.join(self.dataroot, self.phase, "image-densepose", im_name)
         )
+        # TODO(chulayuth) pose_img should be resize here instead in graph processing step?
         pose_img = self.transform(pose_img)  # [-1,1]
  
         result = {}
@@ -330,7 +331,7 @@ def main():
             text_encoder = text_encoder_one,
             text_encoder_2 = text_encoder_two,
             tokenizer = tokenizer_one,
-            tokenizer_2 = tokenizer_two,
+            tokenizer_2 = None, # tokenizer_two, (chulayuth) SD15 does not have tokenizer_2
             scheduler = noise_scheduler,
             image_encoder=image_encoder,
             unet_encoder = unet_encoder,
@@ -399,7 +400,9 @@ def main():
                                 do_classifier_free_guidance=False,
                                 negative_prompt=negative_prompt,
                             )
-                        
+
+                        _debug_print(f'>>>>>>>>>>>>>>>> prompt_embeds.shape = {prompt_embeds.shape}')
+                        _debug_print(f'>>>>>>>>>>>>>>>> prompt_embeds_c.shape = {prompt_embeds_c.shape}')                        
 
 
                         generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
@@ -420,6 +423,7 @@ def main():
                             width=args.width,
                             guidance_scale=args.guidance_scale,
                             ip_adapter_image = image_embeds,
+                            device = pipe.device,
                         )[0]
 
 
