@@ -25,7 +25,7 @@ from diffusers.models.embeddings import SinusoidalPositionalEmbedding
 from diffusers.models.lora import LoRACompatibleLinear
 from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm
 
-DEBUG = True
+DEBUG = False
 
 def _debug_print(s):
     if DEBUG:

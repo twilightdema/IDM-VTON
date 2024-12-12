@@ -26,6 +26,8 @@ from tqdm.auto import tqdm
 from diffusers.training_utils import compute_snr
 import torchvision.transforms.functional as TF
 
+from torch.utils.tensorboard import SummaryWriter
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 DEBUG = False
@@ -265,7 +267,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument("--pretrained_model_name_or_path",type=str,default="diffusers/stable-diffusion-xl-1.0-inpainting-0.1",required=False,help="Path to pretrained model or model identifier from huggingface.co/models.",)
     parser.add_argument("--pretrained_garmentnet_path",type=str,default="stabilityai/stable-diffusion-xl-base-1.0",required=False,help="Path to pretrained model or model identifier from huggingface.co/models.",)
-    parser.add_argument("--checkpointing_epoch",type=int,default=10,help=("Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"" training using `--resume_from_checkpoint`."),)
+
+    parser.add_argument("--logging_epoch", type=int, default=10, help="Loss/Metrics logging frequency.",)
+    parser.add_argument("--logging_dir",type=str,default="logs_xl",help="The output directory where tensorboard log will be written.",)
+
+    parser.add_argument("--checkpointing_epoch",type=int, default=100,help=("Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"" training using `--resume_from_checkpoint`."),)
     parser.add_argument("--pretrained_ip_adapter_path",type=str,default="ckpt/ip_adapter/ip-adapter-plus_sdxl_vit-h.bin",help="Path to pretrained ip adapter model. If not specified weights are initialized randomly.",)
     parser.add_argument("--image_encoder_path",type=str,default="ckpt/image_encoder",required=False,help="Path to CLIP image encoder",)
     parser.add_argument("--gradient_checkpointing",action="store_true",help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",)
@@ -273,7 +279,7 @@ def parse_args():
     parser.add_argument("--height",type=int,default=512,)
     parser.add_argument("--gradient_accumulation_steps",type=int,default=1,help="Number of updates steps to accumulate before performing a backward/update pass.",)
     parser.add_argument("--logging_steps",type=int,default=1000,help=("Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"" training using `--resume_from_checkpoint`."),)
-    parser.add_argument("--output_dir",type=str,default="output",help="The output directory where the model predictions and checkpoints will be written.",)
+    parser.add_argument("--output_dir",type=str,default="output_xl",help="The output directory where the model predictions and checkpoints will be written.",)
     parser.add_argument("--snr_gamma",type=float,default=None,help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. ""More details here: https://arxiv.org/abs/2303.09556.",)
     parser.add_argument("--num_tokens",type=int,default=16,help=("IP adapter token nums"),)
     parser.add_argument("--learning_rate",type=float,default=1e-5,help="Learning rate to use.",)
@@ -507,7 +513,43 @@ def main():
     )
     global_step = 0
     first_epoch = 0
-    train_loss=0.0
+    train_loss = 0.0
+    lowest_loss = 1e+6
+    checkpoint_step_map = {}
+
+    writer = SummaryWriter(log_dir=args.logging_dir)
+
+    def save_checkpoint(save_path: str, checkpoint_mapping_path: str):
+        if accelerator.is_main_process:
+            # TODO(chulayuth): This seems not implemented.
+            # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+            unwrapped_unet = accelerator.unwrap_model(
+                unet, keep_fp32_wrapper=True
+            )
+            pipeline = TryonPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                unet=unwrapped_unet,
+                vae= vae,
+                scheduler=noise_scheduler,
+                tokenizer=tokenizer,
+                # SD15 does not have "2"
+                tokenizer_2=tokenizer,
+                text_encoder=text_encoder,
+                text_encoder_2=text_encoder,
+                image_encoder=image_encoder,
+                unet_encoder=unet_encoder,
+                torch_dtype=torch.float16,
+                add_watermarker=False,
+                safety_checker=None,
+            )
+            pipeline.save_pretrained(save_path)
+            del pipeline
+
+            # Save checkpoint mapping path.
+            with open(checkpoint_mapping_path, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint_step_map, f, ensure_ascii=False, indent=2)            
+
+
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet), accelerator.accumulate(image_proj_model):
@@ -563,6 +605,7 @@ def main():
                                                 num_images_per_prompt=1,
                                                 do_classifier_free_guidance=True,
                                                 negative_prompt=negative_prompt,
+                                                device=device,
                                             )
                                         
                                         
@@ -586,11 +629,13 @@ def main():
                                                     num_images_per_prompt=1,
                                                     do_classifier_free_guidance=False,
                                                     negative_prompt=negative_prompt,
+                                                    device=device,
                                                 )
                                             
 
 
                                             generator = torch.Generator(newpipe.device).manual_seed(args.seed) if args.seed is not None else None
+                                            cloth_pure = sample["cloth_pure"].to(accelerator.device)
                                             images = newpipe(
                                                 prompt_embeds=prompt_embeds,
                                                 negative_prompt_embeds=negative_prompt_embeds,
@@ -601,13 +646,14 @@ def main():
                                                 strength = 1.0,
                                                 pose_img = sample['pose_img'],
                                                 text_embeds_cloth=prompt_embeds_c,
-                                                cloth = sample["cloth_pure"].to(accelerator.device),
+                                                cloth = cloth_pure,
                                                 mask_image=sample['inpaint_mask'],
                                                 image=(sample['image']+1.0)/2.0, 
                                                 height=args.height,
                                                 width=args.width,
                                                 guidance_scale=args.guidance_scale,
                                                 ip_adapter_image = image_embeds,
+                                                device=device,
                                             )[0]
 
                                         for i in range(len(images)):
@@ -641,7 +687,7 @@ def main():
                 mask = mask.reshape(-1, 1, args.height // 8, args.width // 8)
                 _debug_print(f'>>>>>>>>>>>>>>> (After resized) mask.shape = {mask.shape}')
 
-                # We also need to resize the pose_img to match the training image
+                # (chulayuth) We also need to resize the pose_img to match the training image
                 pose_img = batch["pose_img"]
                 pose_img = torch.stack(
                     [
@@ -649,7 +695,8 @@ def main():
                     ]
                 )
                 _debug_print(f'>>>>>>>>>>>>>>> (After resized-0) pose_img.shape = {pose_img.shape}')
-                pose_img = pose_img.reshape(1, -1, args.height, args.width)
+                pose_img = pose_img[0]  # (chulayuth) Remove the 1st dimension
+                # pose_img = pose_img.reshape(1, -1, args.height, args.width)
                 _debug_print(f'>>>>>>>>>>>>>>> (After resized-1) pose_img.shape = {pose_img.shape}')
 
                 pose_map = vae.encode(pose_img.to(dtype=vae.dtype)).latent_dist.sample()
@@ -820,33 +867,35 @@ def main():
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
+                writer.close()
                 break
 
-        if global_step % args.checkpointing_epoch == 0:
-            if accelerator.is_main_process:
-                # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                unwrapped_unet = accelerator.unwrap_model(
-                    unet, keep_fp32_wrapper=True
-                )
-                pipeline = TryonPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    unet=unwrapped_unet,
-                    vae= vae,
-                    scheduler=noise_scheduler,
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    text_encoder=text_encoder,
-                    text_encoder_2=text_encoder_2,
-                    image_encoder=image_encoder,
-                    unet_encoder=unet_encoder,
-                    torch_dtype=torch.float16,
-                    add_watermarker=False,
-                    safety_checker=None,
-                )
-                save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                pipeline.save_pretrained(save_path)
-                del pipeline
+            # (chulayuth) Stop on NaN loss.
+            if math.isnan(logs["step_loss"]):
+                print(f'Stopped at step {global_step} due to NaN loss.')
+                writer.close()
+                break
 
-                
+            if global_step % args.logging_epoch == 0:
+                writer.add_scalar("Loss/train", logs["step_loss"], global_step)
+                writer.flush()
+
+                # (chulayuth) Also save to the best checkpoint, if global_loss looks good.
+                if logs["step_loss"] < lowest_loss:
+                    lowest_loss = logs["step_loss"]
+                    save_path = os.path.join(args.output_dir, "checkpoint-best-train-loss")
+                    checkpoint_mapping_path = os.path.join(args.output_dir, "checkpoint-mapping.json")
+                    checkpoint_step_map[save_path] = global_step 
+                    save_checkpoint(save_path, checkpoint_mapping_path)
+
+
+            if global_step % args.checkpointing_epoch == 0:
+                # (chulayuth) Keeps only 10 checkpoints at maximum.
+                save_path = os.path.join(args.output_dir, f"checkpoint-{global_step % (args.checkpointing_epoch * 10)}")
+                checkpoint_mapping_path = os.path.join(args.output_dir, "checkpoint-mapping.json")
+                checkpoint_step_map[save_path] = global_step 
+                save_checkpoint(save_path, checkpoint_mapping_path)
+
+
 if __name__ == "__main__":
     main()    

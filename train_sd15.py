@@ -15,7 +15,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjec
 
 from src.unet_hacked_tryon import UNet2DConditionModel
 from src.unet_hacked_garmnet import UNet2DConditionModel as UNet2DConditionModel_ref
-from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
+from src.tryon_pipeline_sd15 import StableDiffusionInpaintPipeline as TryonPipeline
 
 from ip_adapter.ip_adapter import Resampler
 from diffusers.utils.import_utils import is_xformers_available
@@ -30,7 +30,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-DEBUG = True
+DEBUG = False
 
 def _debug_print(s):
     if DEBUG:
@@ -780,7 +780,7 @@ def main():
 
                 # encoder_hidden_states = torch.concat([text_embeds, text_embeds_2], dim=-1) # concat
                 _debug_print(f'>>>>>>>>>>>>>>>>> ***encoder_hidden_states.shape = {encoder_hidden_states.shape}')
-                exit(0)
+                # exit(0)
 
 
                 def compute_time_ids(original_size, crops_coords_top_left = (0,0)):

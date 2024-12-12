@@ -32,6 +32,7 @@ from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
 from torchvision import transforms
 import diffusers
+from diffusers import StableDiffusionInpaintPipeline
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, StableDiffusionXLControlNetInpaintPipeline
 from transformers import AutoTokenizer, PretrainedConfig,CLIPImageProcessor, CLIPVisionModelWithProjection,CLIPTextModelWithProjection, CLIPTextModel, CLIPTokenizer
 
@@ -39,7 +40,7 @@ from diffusers.utils.import_utils import is_xformers_available
 
 from src.unet_hacked_tryon import UNet2DConditionModel
 from src.unet_hacked_garmnet import UNet2DConditionModel as UNet2DConditionModel_ref
-from src.tryon_pipeline_sd15 import StableDiffusionInpaintPipeline as TryonPipeline
+from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
 
 
 
@@ -186,6 +187,7 @@ class VitonHDTestDataset(data.Dataset):
         pose_img = self.transform(pose_img)  # [-1,1]
  
         result = {}
+
         result["c_name"] = c_name
         result["im_name"] = im_name
         result["image"] = image
@@ -196,6 +198,7 @@ class VitonHDTestDataset(data.Dataset):
         result["caption_cloth"] = "a photo of " + cloth_annotation
         result["caption"] = "model is wearing a " + cloth_annotation
         result["pose_img"] = pose_img
+
 
         return result
 
@@ -235,79 +238,7 @@ def main():
     # elif accelerator.mixed_precision == "bf16":
     #     weight_dtype = torch.bfloat16
     #     args.mixed_precision = accelerator.mixed_precision
-
-    # Load scheduler, tokenizer and models.
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="vae",
-        torch_dtype=torch.float16,
-    )
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="unet",
-        torch_dtype=torch.float16,
-    )
-    image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="image_encoder",
-        torch_dtype=torch.float16,
-    )
-    unet_encoder = UNet2DConditionModel_ref.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="unet_encoder",
-        torch_dtype=torch.float16,
-    )
-    text_encoder_one = CLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="text_encoder",
-        torch_dtype=torch.float16,
-    )
-    text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="text_encoder_2",
-        torch_dtype=torch.float16,
-    )
-    tokenizer_one = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=None,
-        use_fast=False,
-    )
-    tokenizer_two = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer_2",
-        revision=None,
-        use_fast=False,
-    )
-
-
-    # Freeze vae and text_encoder and set unet to trainable
-    unet.requires_grad_(False)
-    vae.requires_grad_(False)
-    image_encoder.requires_grad_(False)
-    unet_encoder.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
-    unet_encoder.to(accelerator.device, weight_dtype)
-    unet.eval()
-    unet_encoder.eval()
-
     
-    
-    if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            import xformers
-
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warn(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
-
     test_dataset = VitonHDTestDataset(
         dataroot_path=args.data_dir,
         phase="test",
@@ -323,111 +254,59 @@ def main():
 
     _debug_print(f'>>>>>>>>>>>>> accelerator.device = {accelerator.device}')
 
-    pipe = TryonPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=unet,
-            vae=vae,
-            feature_extractor= CLIPImageProcessor(),
-            text_encoder = text_encoder_one,
-            text_encoder_2 = text_encoder_two,
-            tokenizer = tokenizer_one,
-            tokenizer_2 = None, # tokenizer_two, (chulayuth) SD15 does not have tokenizer_2
-            scheduler = noise_scheduler,
-            image_encoder=image_encoder,
-            unet_encoder = unet_encoder,
-            torch_dtype=torch.float16,
+    pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        "stable-diffusion-v1-5/stable-diffusion-inpainting",
+        # "sd-legacy/stable-diffusion-inpainting",
+        # revision="fp16",
+        torch_dtype=torch.float16,
     ).to(accelerator.device)
 
-    # pipe.enable_sequential_cpu_offload()
-    # pipe.enable_model_cpu_offload()
-    # pipe.enable_vae_slicing()
 
+    RUN_COUNT = 10
 
+    count = 0
 
     with torch.no_grad():
         # Extract the images
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 for sample in test_dataloader:
-                    img_emb_list = []
-                    for i in range(sample['cloth'].shape[0]):
-                        img_emb_list.append(sample['cloth'][i])
+
+                    count = count + 1
+                    if count > RUN_COUNT:
+                        break
+
+                    # Also save the input images.
+                    batch_size = sample["image"].shape[0]
+                    _debug_print(f'cloth.shape = {sample["cloth"].shape}')
+                    _debug_print(f'inpaint_mask.shape = {sample["inpaint_mask"].shape}')
+                    for b in range(batch_size):
+                      image = sample['image'][b]
+                      cloth = sample['cloth'][b][0]
+                      inpaint_mask = sample['inpaint_mask'][b]
+                      torchvision.utils.save_image(image, os.path.join(args.output_dir, f'test_{count}_input_image_{b}.jpg'))
+                      torchvision.utils.save_image(cloth, os.path.join(args.output_dir, f'test_{count}_input_cloth_{b}.jpg'))
+                      torchvision.utils.save_image(inpaint_mask, os.path.join(args.output_dir, f'test_{count}_input_inpaint_mask_{b}.jpg'))
+
+                    img_list = []
+                    inp_list = []
+                    for i in range(sample['image'].shape[0]):
+                      image = sample['image'][i]
+                      inpaint_mask = sample['inpaint_mask'][i]
+                      img_list.append(image)
+                      inp_list.append(inpaint_mask)
                     
                     prompt = sample["caption"]
 
-                    num_prompts = sample['cloth'].shape[0]                                        
-                    negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
-
-                    if not isinstance(prompt, List):
-                        prompt = [prompt] * num_prompts
-                    if not isinstance(negative_prompt, List):
-                        negative_prompt = [negative_prompt] * num_prompts
-
-                    image_embeds = torch.cat(img_emb_list,dim=0)
-
-                    with torch.inference_mode():
-                        (
-                            prompt_embeds,
-                            negative_prompt_embeds,
-                        ) = pipe.encode_prompt(
-                            prompt,
-                            num_images_per_prompt=1,
-                            do_classifier_free_guidance=True,
-                            negative_prompt=negative_prompt,
-                        )
-                    
-                    
-                        prompt = sample["caption_cloth"]
-                        negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
-
-                        if not isinstance(prompt, List):
-                            prompt = [prompt] * num_prompts
-                        if not isinstance(negative_prompt, List):
-                            negative_prompt = [negative_prompt] * num_prompts
-
-
-                        with torch.inference_mode():
-                            (
-                                prompt_embeds_c,
-                                _,
-                            ) = pipe.encode_prompt(
-                                prompt,
-                                num_images_per_prompt=1,
-                                do_classifier_free_guidance=False,
-                                negative_prompt=negative_prompt,
-                            )
-
-                        _debug_print(f'>>>>>>>>>>>>>>>> prompt_embeds.shape = {prompt_embeds.shape}')
-                        _debug_print(f'>>>>>>>>>>>>>>>> prompt_embeds_c.shape = {prompt_embeds_c.shape}')                        
-
-
-                        generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
-                        images = pipe(
-                            prompt_embeds=prompt_embeds,
-                            negative_prompt_embeds=negative_prompt_embeds,
-                            # pooled_prompt_embeds=pooled_prompt_embeds,
-                            # negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                            num_inference_steps=args.num_inference_steps,
-                            generator=generator,
-                            strength = 1.0,
-                            pose_img = sample['pose_img'],
-                            text_embeds_cloth=prompt_embeds_c,
-                            cloth = sample["cloth_pure"].to(accelerator.device),
-                            mask_image=sample['inpaint_mask'],
-                            image=(sample['image']+1.0)/2.0, 
-                            height=args.height,
-                            width=args.width,
-                            guidance_scale=args.guidance_scale,
-                            ip_adapter_image = image_embeds,
-                            device = pipe.device,
-                        )[0]
+                    #image and mask_image should be PIL images.
+                    #The mask structure is white for inpainting and black for keeping as is
+                    images = pipe(prompt=prompt, image=img_list[0], mask_image=inp_list[0]).images
 
 
                     for i in range(len(images)):
                         x_sample = pil_to_tensor(images[i])
-                        torchvision.utils.save_image(x_sample,os.path.join(args.output_dir,sample['im_name'][i]))
+                        torchvision.utils.save_image(x_sample, os.path.join(args.output_dir, f'test_{count}_output_{i}.jpg'))
                 
-
 
 
 if __name__ == "__main__":

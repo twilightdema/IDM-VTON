@@ -64,7 +64,7 @@ from ip_adapter.ip_adapter import Resampler
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-DEBUG = True
+DEBUG = False
 
 def _debug_print(s):
     if DEBUG:

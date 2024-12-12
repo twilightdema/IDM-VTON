@@ -58,7 +58,7 @@ from diffusers.models.transformer_2d import Transformer2DModel
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-DEBUG = True
+DEBUG = False
 
 def _debug_print(s):
     if DEBUG:
